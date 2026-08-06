@@ -31,8 +31,13 @@ final class PayHereInboxWorker
     private const MAX_ATTEMPTS = 12;
 
     public function __construct(
-        private readonly Connection                $connection,
-        private readonly PayHereIpnHandlerInterface $handler,
+        private readonly Connection                 $connection,
+        /**
+         * Supplied by the application. Null when it has not wired one yet, in
+         * which case notifications stay pending in the inbox rather than being
+         * consumed by a worker with nowhere to send them.
+         */
+        private readonly ?PayHereIpnHandlerInterface $handler,
         private readonly LoggerInterface           $logger,
         private readonly string                    $table,
     ) {}
@@ -47,6 +52,10 @@ final class PayHereInboxWorker
         $processed = 0;
         $failed    = 0;
         $dead      = 0;
+
+        if ($this->handler === null) {
+            return ['processed' => 0, 'failed' => 0, 'dead' => 0];
+        }
 
         foreach ($this->claim($limit) as $row) {
             try {

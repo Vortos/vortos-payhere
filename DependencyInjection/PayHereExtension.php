@@ -10,6 +10,7 @@ use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Extension\Extension;
 use Symfony\Component\DependencyInjection\Reference;
 use Vortos\PayHere\Api\PayHereApiClient;
@@ -18,6 +19,8 @@ use Vortos\PayHere\Checkout\PayHereSigner;
 use Vortos\PayHere\Enum\PayHereMode;
 use Vortos\PayHere\Failover\PayHereCircuitBreaker;
 use Vortos\PayHere\Gateway\PayHereGateway;
+use Vortos\PayHere\Inbox\PayHereInboxWorker;
+use Vortos\PayHere\Inbox\PayHereIpnHandlerInterface;
 use Vortos\PayHere\Inbox\PayHereInboxWriter;
 use Vortos\PayHere\Inbox\PayHereInboxWriterInterface;
 use Vortos\PayHere\Webhook\PayHereIpnController;
@@ -136,6 +139,27 @@ final class PayHereExtension extends Extension
             ->setPublic(false);
 
         $container->setAlias(PayHereInboxWriterInterface::class, PayHereInboxWriter::class)->setPublic(false);
+
+        // The worker that turns stored notifications into settled payments.
+        //
+        // Its handler is supplied by the application, because deciding what a
+        // notification *means* — and checking the notified amount against the
+        // price we froze — is a business decision this package must not make.
+        // Ignored-on-invalid so an application that has not wired one yet still
+        // boots: notifications accumulate durably in the inbox rather than the
+        // container refusing to build.
+        $container->register(PayHereInboxWorker::class, PayHereInboxWorker::class)
+            ->setArguments([
+                '$connection' => new Reference(Connection::class),
+                '$handler'    => new Reference(
+                    PayHereIpnHandlerInterface::class,
+                    ContainerInterface::IGNORE_ON_INVALID_REFERENCE,
+                ),
+                '$logger'     => new Reference(LoggerInterface::class),
+                '$table'      => $prefix . $resolved['inbox_table'],
+            ])
+            ->setShared(true)
+            ->setPublic(true);
 
         $container->register(PayHereIpnController::class, PayHereIpnController::class)
             ->setArguments([
