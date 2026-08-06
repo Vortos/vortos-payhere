@@ -1,0 +1,33 @@
+{
+    "name": "vortos/vortos-payhere",
+    "description": "Vortos PayHere integration — hosted checkout signing, IPN verification with inbox, retrieval and refund APIs, behind the vortos-payments gateway contracts",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Vortos\\PayHere\\": ""
+        }
+    },
+    "require": {
+        "php": ">=8.2",
+        "ext-json": "*",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^2.0",
+        "psr/log": "^3.0",
+        "vortos/vortos-foundation": "^1.0",
+        "vortos/vortos-http": "^1.0",
+        "vortos/vortos-payments": "^1.0",
+        "vortos/vortos-persistence": "^1.0",
+        "doctrine/dbal": "^4.4"
+    },
+    "suggest": {
+        "vortos/vortos-security": "Required for the #[SkipCsrf] attribute on the IPN endpoint"
+    },
+    "extra": {
+        "vortos": {
+            "package": "Vortos\\PayHere\\DependencyInjection\\PayHerePackage",
+            "order": 131
+        }
+    }
+}
