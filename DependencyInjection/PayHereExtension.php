@@ -170,6 +170,13 @@ final class PayHereExtension extends Extension
             // Controllers are resolved by the router, so this one is public
             // where the services behind it are not.
             ->setShared(true)
-            ->setPublic(true);
+            ->setPublic(true)
+            // The tag is what actually creates the route. #[AsController] only
+            // auto-tags services the container autoconfigures, and a service a
+            // package registers by hand is not one of those — so without this
+            // the controller exists, is public, and is reachable by nothing.
+            // PayHere then posts settlement notifications to a 404 and every
+            // payment silently never settles.
+            ->addTag('vortos.api.controller');
     }
 }
