@@ -15,10 +15,11 @@ use Vortos\PayHere\Webhook\PayHereIpnEvent;
  * "PayHere delivered it" and "we acted on it" independently true or false.
  *
  * ── Claiming ──────────────────────────────────────────────────────────────
- * Rows are claimed with `FOR UPDATE SKIP LOCKED`. Several workers may run at
- * once — and in a long-lived worker pool they will — so two of them picking up
- * the same notification would credit the same payment twice, which is the one
- * outcome nothing downstream can undo.
+ * Rows are claimed by an atomic `UPDATE ... RETURNING`, not a bare
+ * `SELECT ... FOR UPDATE`. Several workers run at once in a long-lived pool, so
+ * two of them picking up the same notification would credit the same payment
+ * twice — the one outcome nothing downstream can undo. See claim() for why the
+ * obvious SELECT does not actually prevent that.
  *
  * ── Backoff ───────────────────────────────────────────────────────────────
  * Exponential, capped. After the attempt ceiling a row is dead-lettered rather
@@ -29,6 +30,14 @@ use Vortos\PayHere\Webhook\PayHereIpnEvent;
 final class PayHereInboxWorker
 {
     private const MAX_ATTEMPTS = 12;
+
+    /**
+     * How long a claimed notification is held before another worker may retry
+     * it. Long enough that an ordinary handler finishes well inside it, short
+     * enough that a worker killed mid-flight does not strand a payment for an
+     * afternoon.
+     */
+    private const LEASE_SECONDS = 300;
 
     public function __construct(
         private readonly Connection                 $connection,
@@ -106,19 +115,53 @@ final class PayHereInboxWorker
         return ['processed' => $processed, 'failed' => $failed, 'dead' => $dead];
     }
 
-    /** @return list<array<string, mixed>> */
+    /**
+     * Claims rows by transitioning them, atomically, in one statement.
+     *
+     * ── Why not a plain SELECT ... FOR UPDATE SKIP LOCKED ─────────────────
+     * Because that is a lie under autocommit. The row locks a bare SELECT takes
+     * are released the instant the statement returns, so by the time the caller
+     * loops over the rows it holds nothing — SKIP LOCKED skips nothing, and two
+     * workers happily claim the same notification. The guarantee reads as though
+     * it is there and is not.
+     *
+     * An UPDATE ... RETURNING carries its own implicit transaction, so the
+     * SKIP LOCKED in its sub-select is held for the whole claim and the status
+     * transition commits with it. One statement, no explicit transaction to
+     * leak, and a row is claimed by exactly one worker.
+     *
+     * ── Recovering a worker that died mid-claim ───────────────────────────
+     * A claimed row is parked with `next_attempt_at` a lease ahead. If the
+     * worker never finishes — killed, OOM, deploy — the lease expires and the
+     * row is picked up again by the clause below. Nothing is stranded in
+     * `processing` forever waiting for a human to notice.
+     *
+     * @return list<array<string, mixed>>
+     */
     private function claim(int $limit): array
     {
         $now = new \DateTimeImmutable();
 
         return $this->connection->fetchAllAssociative(
-            'SELECT id, event_id, payload, attempts
-               FROM ' . $this->table . '
-              WHERE status = :status AND next_attempt_at <= :now
-              ORDER BY received_at
-              LIMIT ' . max(1, $limit) . '
-                FOR UPDATE SKIP LOCKED',
-            ['status' => 'pending', 'now' => $now->format('Y-m-d H:i:s')],
+            'UPDATE ' . $this->table . '
+                SET status = :processing,
+                    next_attempt_at = :lease
+              WHERE id IN (
+                    SELECT id
+                      FROM ' . $this->table . '
+                     WHERE (status = :pending OR status = :processing)
+                       AND next_attempt_at <= :now
+                     ORDER BY received_at
+                     LIMIT ' . max(1, $limit) . '
+                       FOR UPDATE SKIP LOCKED
+                    )
+          RETURNING id, event_id, payload, attempts',
+            [
+                'pending'    => 'pending',
+                'processing' => 'processing',
+                'now'        => $now->format('Y-m-d H:i:s'),
+                'lease'      => $now->modify('+' . self::LEASE_SECONDS . ' seconds')->format('Y-m-d H:i:s'),
+            ],
         );
     }
 
@@ -139,7 +182,7 @@ final class PayHereInboxWorker
 
         $this->connection->executeStatement(
             'UPDATE ' . $this->table . '
-                SET attempts = :attempts, last_error = :error, next_attempt_at = :next
+                SET status = \'pending\', attempts = :attempts, last_error = :error, next_attempt_at = :next
               WHERE id = :id',
             [
                 'attempts' => $attempts,
